@@ -1,12 +1,12 @@
 const express = require("express");
 const app = express();
 
-const postsRouter = require("./routes/posts"); 
+const questionRouter = require("./routes/questions"); 
 
 app.use(express.json());
 
 // everything under /api/posts
-app.use("/api/posts", postsRouter);
+app.use("/api/questions", questionRouter);
 
 app.use((req, res) => {
   res.json({msg: "Not found"});
