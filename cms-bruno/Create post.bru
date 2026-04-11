@@ -1,0 +1,20 @@
+meta {
+  name: Create post
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "title": "New post",
+    "content": "TBA",
+    "date": "29-03-2026",
+    "keywords": ["uef"]
+  }
+}
