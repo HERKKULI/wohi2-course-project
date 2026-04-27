@@ -7,7 +7,17 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+model User {
+  id       Int    @id @default(autoincrement())
+  email    String @unique @db.VarChar(255)
+  password String @db.VarChar(255)
+  name     String @db.VarChar(100)
+  question    Question[]
+}
+
 model Question {
+  userId   Int
+  user     User @relation(fields: [userId], references: [id])
   id       Int       @id @default(autoincrement())
   title    String    @db.VarChar(255)
   date     DateTime

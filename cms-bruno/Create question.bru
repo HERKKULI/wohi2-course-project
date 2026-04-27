@@ -5,16 +5,20 @@ meta {
 }
 
 post {
-  url: {{baseUrl}}
+  url: {{baseUrl}}/api/questions
   body: json
-  auth: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjIsImlhdCI6MTc3NzI4Njg1MiwiZXhwIjoxNzc3MjkwNDUyfQ.k7qBc1MBgryIoRB6k1yRC1gL8RcWpK8LhAqhwmruRbI
 }
 
 body:json {
   {
-    "title": "New post",
-    "content": "TBA",
-    "date": "2026-03-29",
-    "keywords": ["uef"]
+    "title": "Miten JWT toimii?",
+    "content": "Haluaisin ymmärtää tokenien toimintaa paremmin.",
+    "date": "2026-04-27",
+    "keywords": ["jwt", "auth", "backend"]
   }
 }
