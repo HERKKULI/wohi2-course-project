@@ -1,5 +1,6 @@
 generator client {
   provider = "prisma-client-js"
+  engineType = "library"
 }
 
 datasource db {
@@ -12,7 +13,10 @@ model User {
   email    String @unique @db.VarChar(255)
   password String @db.VarChar(255)
   name     String @db.VarChar(100)
-  question    Question[]
+  question Question[]
+  attempts Attempt[]
+
+  @@map("users")
 }
 
 model Question {
@@ -20,9 +24,11 @@ model Question {
   user     User @relation(fields: [userId], references: [id])
   id       Int       @id @default(autoincrement())
   title    String    @db.VarChar(255)
+  imageUrl String?  @db.VarChar(255)
   date     DateTime
   content  String    @db.Text
   keywords Keyword[]
+  attempts Attempt[]
 
   @@map("questions")
 }
@@ -34,3 +40,22 @@ model Keyword {
 
   @@map("keywords")
 }
+
+model Attempt {
+  id         Int      @id @default(autoincrement())
+  createdAt  DateTime @default(now())
+  
+  userId     Int
+  user       User     @relation(fields: [userId], references: [id])
+  
+  questionId Int
+  question   Question @relation(fields: [questionId], references: [id])
+  
+  userAnswer String   @db.Text // What the user typed
+  isCorrect  Boolean           // Was it correct?
+
+  // Notice: NO @@unique([userId, questionId]) here, 
+  // so a user can attempt the same question multiple times!
+  @@map("attempts")
+}
+

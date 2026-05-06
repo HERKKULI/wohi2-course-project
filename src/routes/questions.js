@@ -1,134 +1,274 @@
 const express = require("express");
 const router = express.Router();
 const prisma = require("../lib/prisma");
-const authenticate = require("../middleware/auth"); // TARKISTA ONKO TÄMÄ KANSIO middleware VAI middlewares
+const authenticate = require("../middleware/auth");
 const isOwner = require("../middleware/isOwner");
+const multer = require("multer");
+const path = require('path');
 
-// Kaikki tämän tiedoston reitit vaativat kirjautumisen
+const storage = multer.diskStorage({
+  destination: path.join(__dirname, "..", "..", "public", "uploads"),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    cb(null, `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`);
+  },
+});
+
+const upload = multer({
+  storage,
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith("image/")) cb(null, true);
+    else cb(new Error("Only image files are allowed"));
+  },
+  limits: { fileSize: 5 * 1024 * 1024 },
+});
+
+// Apply authentication to ALL routes
 router.use(authenticate);
 
-// Apufunktio siistimään päivämäärät ja avainsanat vastaukseen
+// 1. UPDATED: Format Question logic for Attempts, Badges, and Frontend Naming
 function formatQuestion(question) {
-  if (!question) return null;
+  // 1. Lasketaan yritykset
+  // 'attempts' sisältää vain TÄMÄN käyttäjän yritykset (koska haku on rajattu GET-reitissä)
+  // '_count.attempts' sisältää KAIKKIEN käyttäjien yritysten määrän
+  const userAttempts = question.attempts || [];
+  const isSolved = userAttempts.some(a => a.isCorrect);
+
   return {
     ...question,
-    date: question.date instanceof Date ? question.date.toISOString().split("T")[0] : question.date,
+    question: question.title, 
+    answer: question.content,
+    date: question.date.toISOString().split("T")[0],
     keywords: question.keywords ? question.keywords.map((k) => k.name) : [],
+    userName: question.user?.name || null,
+    
+    // TÄMÄ ON TÄRKEÄ: Lähetetään yritysten määrä useammalla eri nimellä varmuuden vuoksi
+    attemptCount: question._count?.attempts ?? 0,
+    attemptsCount: question._count?.attempts ?? 0, 
+    
+    // Solved-status
+    isSolved: isSolved, 
+    solved: isSolved, 
+    
+    // Siivotaan Prisman omat liitostaulut pois
+    title: undefined,
+    content: undefined,
+    user: undefined,
+    attempts: undefined, 
+    _count: undefined,
   };
 }
 
-// GET /questions - Listaa kaikki tai suodata avainsanalla
+// GET /questions 
+// List all questions
 router.get("/", async (req, res) => {
-  try {
-    const { keyword } = req.query;
-    const where = keyword ? { keywords: { some: { name: keyword } } } : {};
+  const { keyword } = req.query;
 
-    const questions = await prisma.question.findMany({
-      where,
-      include: { keywords: true },
-      orderBy: { id: "asc" },
-    });
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const limit = Math.max(1, Math.min(100, parseInt(req.query.limit) || 5));
+  const skip = (page - 1) * limit;
 
-    res.json(questions.map(formatQuestion));
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Virhe haettaessa kysymyksiä" });
-  }
+  const where = keyword
+    ? { keywords: { some: { name: keyword } } }
+    : {};
+
+  const [filteredQuestions, total] = await Promise.all([
+    prisma.question.findMany({
+        where,
+        include: {
+            keywords: true,
+            user: true,
+            attempts: { where: { userId: req.user.userId } }, 
+            _count: { select: { attempts: true } },
+        },
+        orderBy: { id: "asc" },
+        skip,
+        take: limit,
+    }),
+    prisma.question.count({ where }),
+  ]);
+
+  res.json({
+    data: filteredQuestions.map(formatQuestion),
+    page,
+    limit,
+    total,
+    totalPages: Math.ceil(total / limit),
+  });
 });
 
-// GET /questions/:questionId - Näytä yksi
+// GET /questions/:questionId
+// Show a specific question
 router.get("/:questionId", async (req, res) => {
-  try {
-    const questionId = Number(req.params.questionId);
-    const question = await prisma.question.findUnique({
-      where: { id: questionId },
-      include: { keywords: true },
-    });
+  const questionId = Number(req.params.questionId);
 
-    if (!question) return res.status(404).json({ message: "Kysymystä ei löytynyt" });
-    res.json(formatQuestion(question));
-  } catch (error) {
-    res.status(500).json({ error: "Palvelinvirhe" });
+  const question = await prisma.question.findUnique({
+    where: { id: questionId },
+    include: { 
+        keywords: true, 
+        user: true,
+        attempts: { where: { userId: req.user.userId } },
+        _count: { select: { attempts: true } }  
+    },
+  });
+
+  if (!question) {
+    return res.status(404).json({ message: "question not found" });
   }
+
+  res.json(formatQuestion(question));
 });
 
-// POST /questions - Luo uusi
-router.post("/", async (req, res) => {
-  try {
-    const { title, date, content, keywords } = req.body;
-    if (!title || !date || !content) {
-      return res.status(400).json({ message: "title, date, and content are required" });
-    }
+// POST /questions
+// Create a new question
+router.post("/", upload.single("image"), async (req, res) => {
+  // MUUTETTU: Luetaan frontendin lähettämät 'question' ja 'answer'
+  const { question, answer, keywords } = req.body; 
 
-    const keywordsArray = Array.isArray(keywords) ? keywords : [];
+  if (!question || !answer) {
+    return res.status(400).json({
+      message: "question and answer are required"
+    });
+  }
+  
+  const keywordsArray = Array.isArray(keywords) ? keywords : [];
+  const imageUrl = req.file ? `/uploads/${req.file.filename}` : null;
+  
+  try {
     const newQuestion = await prisma.question.create({
-      data: {
-        title,
-        date: new Date(date),
-        content,
-        userId: req.user.userId, // Varmista että middleware asettaa req.user.userId:n
+        data: {
+        // MUUTETTU: Tallennetaan tietokantaan nimillä 'title' ja 'content'
+        title: question, 
+        content: answer, 
+        imageUrl,
+        date: new Date(), 
+        userId: req.user.userId,
         keywords: {
           connectOrCreate: keywordsArray.map((kw) => ({
-            where: { name: kw },
-            create: { name: kw },
-          })),
+            where: { name: kw }, create: { name: kw },
+          })), 
         },
       },
-      include: { keywords: true },
-    });
-    res.status(201).json(formatQuestion(newQuestion));
+      include: { keywords: true, user: true, _count: { select: { attempts: true } } },
+      });
+      res.status(201).json(formatQuestion(newQuestion));
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Kysymyksen luonti epäonnistui" });
+      res.status(500).json({ message: "Error creating question", error: error.message });
   }
 });
 
-// PUT /questions/:questionId - Muokkaa (vain omistajalle)
-router.put("/:questionId", isOwner, async (req, res) => {
-  try {
-    const questionId = Number(req.params.questionId);
-    const { title, date, content, keywords } = req.body;
 
-    if (!title || !date || !content) {
-      return res.status(400).json({ msg: "title, date and content are mandatory" });
-    }
+// PUT /questions/:questionId
+// Edit a question
+router.put("/:questionId", upload.single("image"), isOwner, async (req, res) => {
+  const questionId = Number(req.params.questionId);
+  
+  // MUUTETTU: Luetaan frontendin lähettämät 'question' ja 'answer'
+  const { question, answer, keywords } = req.body;
 
-    const keywordsArray = Array.isArray(keywords) ? keywords : [];
-    const updatedQuestion = await prisma.question.update({
-      where: { id: questionId },
-      data: {
-        title,
-        date: new Date(date),
-        content,
-        keywords: {
-          set: [], // Nollataan vanhat avainsanat
-          connectOrCreate: keywordsArray.map((kw) => ({
-            where: { name: kw },
-            create: { name: kw },
-          })),
-        },
-      },
-      include: { keywords: true },
-    });
-    res.json(formatQuestion(updatedQuestion));
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Muokkaus epäonnistui" });
+  const existingQuestion = await prisma.question.findUnique({ where: { id: questionId } });
+  if (!existingQuestion) {
+    return res.status(404).json({ message: "Question not found" });
   }
+
+  if (!question || !answer) {
+    return res.status(400).json({ msg: "question and answer are mandatory" });
+  }
+  const imageUrl = req.file ? `/uploads/${req.file.filename}` : existingQuestion.imageUrl;
+
+  const keywordsArray = Array.isArray(keywords) ? keywords : [];
+  const updatedQuestion = await prisma.question.update({
+    where: { id: questionId },
+    data: {
+      // MUUTETTU: Tallennetaan tietokantaan nimillä 'title' ja 'content'
+      title: question, 
+      content: answer, 
+      imageUrl,
+      keywords: {
+        set: [],
+        connectOrCreate: keywordsArray.map((kw) => ({
+          where: { name: kw },
+          create: { name: kw },
+        })),
+      },
+    },
+    include: { keywords: true, user: true, _count: { select: { attempts: true } } },
+  });
+  res.json(formatQuestion(updatedQuestion));
 });
 
-// DELETE /questions/:questionId - Poista (vain omistajalle)
+
+// DELETE /questions/:questionId
+// Delete a question
 router.delete("/:questionId", isOwner, async (req, res) => {
-  try {
-    const questionId = Number(req.params.questionId);
-    const deleted = await prisma.question.delete({
-      where: { id: questionId },
-      include: { keywords: true },
-    });
-    res.json({ message: "Deleted successfully", question: formatQuestion(deleted) });
-  } catch (error) {
-    res.status(500).json({ error: "Poisto epäonnistui" });
+  const questionId = Number(req.params.questionId);
+
+  const question = await prisma.question.findUnique({
+    where: { id: questionId },
+    include: { keywords: true, user: true, _count: { select: { attempts: true } } },
+  });
+
+  if (!question) {
+    return res.status(404).json({ message: "Question not found" });
   }
+
+  await prisma.question.delete({ where: { id: questionId } });
+
+  res.json({
+    message: "Question deleted successfully",
+    question: formatQuestion(question),
+  });
+});
+
+// POST /questions/:questionId/play
+// Attempts / Play (M:N + correctness + "solved" badge)
+router.post("/:questionId/play", async (req, res) => {
+    const questionId = Number(req.params.questionId);
+    const { answer } = req.body; 
+  
+    if (!answer) {
+      return res.status(400).json({ message: "Answer is required" });
+    }
+  
+    const question = await prisma.question.findUnique({ where: { id: questionId } });
+    if (!question) {
+      return res.status(404).json({ message: "Question not found" });
+    }
+  
+    // Check correctness (case-insensitive and ignoring extra spaces)
+    const isCorrect = answer.trim().toLowerCase() === question.content.trim().toLowerCase();
+  
+    // Save the attempt
+    const attempt = await prisma.attempt.create({
+      data: {
+        userId: req.user.userId,
+        questionId: questionId,
+        userAnswer: answer,
+        isCorrect: isCorrect,
+      },
+    });
+  
+    // Calculate the "Solved" badge status
+    const correctAttemptsCount = await prisma.attempt.count({
+      where: { 
+        userId: req.user.userId, 
+        questionId: questionId, 
+        isCorrect: true 
+      }
+    });
+  
+    res.status(201).json({
+      message: isCorrect ? "Correct!" : "Incorrect!",
+      correct: isCorrect, // Frontendin if-lause tarvitsee tämän
+      isSolved: correctAttemptsCount > 0,
+      
+      // Korjataan "undefined" paljastamatta vastausta:
+      // Koska frontti näyttää "The answer was: ${result.correctAnswer}", 
+      // tämä saa sen näyttämään: "The answer was: not this one! Try again."
+      correctAnswer: isCorrect ? question.content : "not this one! Try again.",
+      
+      attempt: attempt
+    });
 });
 
 module.exports = router;
