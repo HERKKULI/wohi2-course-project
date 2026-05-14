@@ -5,6 +5,15 @@ const authenticate = require("../middleware/auth");
 const isOwner = require("../middleware/isOwner");
 const multer = require("multer");
 const path = require('path');
+const { z } = require("zod");
+// 1. Properly imported Error classes!
+const { NotFoundError, ValidationError } = require("../lib/errors");
+
+const PostInput = z.object({
+  question: z.string().min(1),
+  answer: z.string().min(1),
+  keywords: z.union([z.string(), z.array(z.string())]).optional(),
+});
 
 const storage = multer.diskStorage({
   destination: path.join(__dirname, "..", "..", "public", "uploads"),
@@ -18,7 +27,7 @@ const upload = multer({
   storage,
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith("image/")) cb(null, true);
-    else cb(new Error("Only image files are allowed"));
+    else cb(new ValidationError("Only image files are allowed"));
   },
   limits: { fileSize: 5 * 1024 * 1024 },
 });
@@ -26,11 +35,15 @@ const upload = multer({
 // Apply authentication to ALL routes
 router.use(authenticate);
 
-// 1. UPDATED: Format Question logic for Attempts, Badges, and Frontend Naming
+router.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError ||
+      err?.message === "Only image files are allowed") {
+    return res.status(400).json({ msg: err.message });
+  }
+  next(err); // pass through to global handler
+});
+
 function formatQuestion(question) {
-  // 1. Lasketaan yritykset
-  // 'attempts' sisältää vain TÄMÄN käyttäjän yritykset (koska haku on rajattu GET-reitissä)
-  // '_count.attempts' sisältää KAIKKIEN käyttäjien yritysten määrän
   const userAttempts = question.attempts || [];
   const isSolved = userAttempts.some(a => a.isCorrect);
 
@@ -41,16 +54,10 @@ function formatQuestion(question) {
     date: question.date.toISOString().split("T")[0],
     keywords: question.keywords ? question.keywords.map((k) => k.name) : [],
     userName: question.user?.name || null,
-    
-    // TÄMÄ ON TÄRKEÄ: Lähetetään yritysten määrä useammalla eri nimellä varmuuden vuoksi
     attemptCount: question._count?.attempts ?? 0,
     attemptsCount: question._count?.attempts ?? 0, 
-    
-    // Solved-status
     isSolved: isSolved, 
     solved: isSolved, 
-    
-    // Siivotaan Prisman omat liitostaulut pois
     title: undefined,
     content: undefined,
     user: undefined,
@@ -59,85 +66,89 @@ function formatQuestion(question) {
   };
 }
 
-// GET /questions 
-// List all questions
-router.get("/", async (req, res) => {
-  const { keyword } = req.query;
-
-  const page = Math.max(1, parseInt(req.query.page) || 1);
-  const limit = Math.max(1, Math.min(100, parseInt(req.query.limit) || 5));
-  const skip = (page - 1) * limit;
-
-  const where = keyword
-    ? { keywords: { some: { name: keyword } } }
-    : {};
-
-  const [filteredQuestions, total] = await Promise.all([
-    prisma.question.findMany({
-        where,
-        include: {
-            keywords: true,
-            user: true,
-            attempts: { where: { userId: req.user.userId } }, 
-            _count: { select: { attempts: true } },
-        },
-        orderBy: { id: "asc" },
-        skip,
-        take: limit,
-    }),
-    prisma.question.count({ where }),
-  ]);
-
-  res.json({
-    data: filteredQuestions.map(formatQuestion),
-    page,
-    limit,
-    total,
-    totalPages: Math.ceil(total / limit),
-  });
-});
-
-// GET /questions/:questionId
-// Show a specific question
-router.get("/:questionId", async (req, res) => {
-  const questionId = Number(req.params.questionId);
-
-  const question = await prisma.question.findUnique({
-    where: { id: questionId },
-    include: { 
-        keywords: true, 
-        user: true,
-        attempts: { where: { userId: req.user.userId } },
-        _count: { select: { attempts: true } }  
-    },
-  });
-
-  if (!question) {
-    return res.status(404).json({ message: "question not found" });
-  }
-
-  res.json(formatQuestion(question));
-});
-
-// POST /questions
-// Create a new question
-router.post("/", upload.single("image"), async (req, res) => {
-  // MUUTETTU: Luetaan frontendin lähettämät 'question' ja 'answer'
-  const { question, answer, keywords } = req.body; 
-
-  if (!question || !answer) {
-    return res.status(400).json({
-      message: "question and answer are required"
-    });
-  }
-  
-  const keywordsArray = Array.isArray(keywords) ? keywords : [];
-  const imageUrl = req.file ? `/uploads/${req.file.filename}` : null;
-  
+// ==========================================
+// GET /questions (The missing route!)
+// ==========================================
+router.get("/", async (req, res, next) => {
   try {
+    const { keyword } = req.query;
+
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.max(1, Math.min(100, parseInt(req.query.limit) || 5));
+    const skip = (page - 1) * limit;
+
+    const where = keyword
+      ? { keywords: { some: { name: keyword } } }
+      : {};
+
+    const [filteredQuestions, total] = await Promise.all([
+      prisma.question.findMany({
+          where,
+          include: {
+              keywords: true,
+              user: true,
+              attempts: { where: { userId: req.user.userId } }, 
+              _count: { select: { attempts: true } },
+          },
+          orderBy: { id: "asc" },
+          skip,
+          take: limit,
+      }),
+      prisma.question.count({ where }),
+    ]);
+
+    return res.json({
+      data: filteredQuestions.map(formatQuestion),
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ==========================================
+// GET /questions/:questionId
+// ==========================================
+router.get("/:questionId", async (req, res, next) => {
+  try {
+    const questionId = Number(req.params.questionId);
+
+    const question = await prisma.question.findUnique({
+      where: { id: questionId },
+      include: { 
+          keywords: true, 
+          user: true,
+          attempts: { where: { userId: req.user.userId } },
+          _count: { select: { attempts: true } }  
+      },
+    });
+
+    if (!question) {
+      throw new NotFoundError("Question not found");
+    }
+
+    return res.json(formatQuestion(question));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ==========================================
+// POST /questions
+// ==========================================
+router.post("/", upload.single("image"), async (req, res, next) => {
+  try {
+    const data = PostInput.parse(req.body); 
+    const { question, answer, keywords } = data; 
+    
+    const keywordsArray = Array.isArray(keywords) ? keywords : [];
+    const imageUrl = req.file ? `/uploads/${req.file.filename}` : null;
+    
     const newQuestion = await prisma.question.create({
         data: {
-        // MUUTETTU: Tallennetaan tietokantaan nimillä 'title' ja 'content'
         title: question, 
         content: answer, 
         imageUrl,
@@ -150,125 +161,130 @@ router.post("/", upload.single("image"), async (req, res) => {
         },
       },
       include: { keywords: true, user: true, _count: { select: { attempts: true } } },
-      });
-      res.status(201).json(formatQuestion(newQuestion));
-  } catch (error) {
-      res.status(500).json({ message: "Error creating question", error: error.message });
+    });
+      
+    return res.status(201).json(formatQuestion(newQuestion));
+  } catch (err) {
+      next(err);
   }
 });
 
-
+// ==========================================
 // PUT /questions/:questionId
-// Edit a question
-router.put("/:questionId", upload.single("image"), isOwner, async (req, res) => {
-  const questionId = Number(req.params.questionId);
-  
-  // MUUTETTU: Luetaan frontendin lähettämät 'question' ja 'answer'
-  const { question, answer, keywords } = req.body;
-
-  const existingQuestion = await prisma.question.findUnique({ where: { id: questionId } });
-  if (!existingQuestion) {
-    return res.status(404).json({ message: "Question not found" });
-  }
-
-  if (!question || !answer) {
-    return res.status(400).json({ msg: "question and answer are mandatory" });
-  }
-  const imageUrl = req.file ? `/uploads/${req.file.filename}` : existingQuestion.imageUrl;
-
-  const keywordsArray = Array.isArray(keywords) ? keywords : [];
-  const updatedQuestion = await prisma.question.update({
-    where: { id: questionId },
-    data: {
-      // MUUTETTU: Tallennetaan tietokantaan nimillä 'title' ja 'content'
-      title: question, 
-      content: answer, 
-      imageUrl,
-      keywords: {
-        set: [],
-        connectOrCreate: keywordsArray.map((kw) => ({
-          where: { name: kw },
-          create: { name: kw },
-        })),
-      },
-    },
-    include: { keywords: true, user: true, _count: { select: { attempts: true } } },
-  });
-  res.json(formatQuestion(updatedQuestion));
-});
-
-
-// DELETE /questions/:questionId
-// Delete a question
-router.delete("/:questionId", isOwner, async (req, res) => {
-  const questionId = Number(req.params.questionId);
-
-  const question = await prisma.question.findUnique({
-    where: { id: questionId },
-    include: { keywords: true, user: true, _count: { select: { attempts: true } } },
-  });
-
-  if (!question) {
-    return res.status(404).json({ message: "Question not found" });
-  }
-
-  await prisma.question.delete({ where: { id: questionId } });
-
-  res.json({
-    message: "Question deleted successfully",
-    question: formatQuestion(question),
-  });
-});
-
-// POST /questions/:questionId/play
-// Attempts / Play (M:N + correctness + "solved" badge)
-router.post("/:questionId/play", async (req, res) => {
+// ==========================================
+router.put("/:questionId", upload.single("image"), isOwner, async (req, res, next) => {
+  try {
     const questionId = Number(req.params.questionId);
-    const { answer } = req.body; 
-  
-    if (!answer) {
-      return res.status(400).json({ message: "Answer is required" });
+    const { question, answer, keywords } = req.body;
+
+    const existingQuestion = await prisma.question.findUnique({ where: { id: questionId } });
+    if (!existingQuestion) {
+      throw new NotFoundError("Question not found");
     }
-  
-    const question = await prisma.question.findUnique({ where: { id: questionId } });
-    if (!question) {
-      return res.status(404).json({ message: "Question not found" });
+
+    if (!question || !answer) {
+      throw new ValidationError("question and answer are mandatory");
     }
-  
-    // Check correctness (case-insensitive and ignoring extra spaces)
-    const isCorrect = answer.trim().toLowerCase() === question.content.trim().toLowerCase();
-  
-    // Save the attempt
-    const attempt = await prisma.attempt.create({
+    
+    const imageUrl = req.file ? `/uploads/${req.file.filename}` : existingQuestion.imageUrl;
+    const keywordsArray = Array.isArray(keywords) ? keywords : [];
+    
+    const updatedQuestion = await prisma.question.update({
+      where: { id: questionId },
       data: {
-        userId: req.user.userId,
-        questionId: questionId,
-        userAnswer: answer,
-        isCorrect: isCorrect,
+        title: question, 
+        content: answer, 
+        imageUrl,
+        keywords: {
+          set: [],
+          connectOrCreate: keywordsArray.map((kw) => ({
+            where: { name: kw },
+            create: { name: kw },
+          })),
+        },
       },
+      include: { keywords: true, user: true, _count: { select: { attempts: true } } },
     });
-  
-    // Calculate the "Solved" badge status
-    const correctAttemptsCount = await prisma.attempt.count({
-      where: { 
-        userId: req.user.userId, 
-        questionId: questionId, 
-        isCorrect: true 
+    
+    return res.json(formatQuestion(updatedQuestion));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ==========================================
+// DELETE /questions/:questionId
+// ==========================================
+router.delete("/:questionId", isOwner, async (req, res, next) => {
+  try {
+    const questionId = Number(req.params.questionId);
+
+    const question = await prisma.question.findUnique({
+      where: { id: questionId },
+      include: { keywords: true, user: true, _count: { select: { attempts: true } } },
+    });
+
+    if (!question) {
+      throw new NotFoundError("Question not found");
+    }
+
+    await prisma.question.delete({ where: { id: questionId } });
+
+    return res.json({
+      message: "Question deleted successfully",
+      question: formatQuestion(question),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ==========================================
+// POST /questions/:questionId/play
+// ==========================================
+router.post("/:questionId/play", async (req, res, next) => {
+    try {
+      const questionId = Number(req.params.questionId);
+      const { answer } = req.body; 
+    
+      if (!answer) {
+        throw new ValidationError("Answer is required");
       }
-    });
-  
-    res.status(201).json({
-      message: isCorrect ? "Correct!" : "Incorrect!",
-      correct: isCorrect, // Frontendin if-lause tarvitsee tämän
-      isSolved: correctAttemptsCount > 0,
-      
-      // Korjataan "undefined" paljastamatta vastausta:
-      // Koska frontti näyttää "The answer was: ${result.correctAnswer}", 
-      // tämä saa sen näyttämään: "The answer was: not this one! Try again."
-      correctAnswer: isCorrect ? question.content : "not this one! Try again.",
-      
-      attempt: attempt
-    });
+    
+      const question = await prisma.question.findUnique({ where: { id: questionId } });
+      if (!question) {
+        throw new NotFoundError("Question not found");
+      }
+    
+      const isCorrect = answer.trim().toLowerCase() === question.content.trim().toLowerCase();
+    
+      const attempt = await prisma.attempt.create({
+        data: {
+          userId: req.user.userId,
+          questionId: questionId,
+          userAnswer: answer,
+          isCorrect: isCorrect,
+        },
+      });
+    
+      const correctAttemptsCount = await prisma.attempt.count({
+        where: { 
+          userId: req.user.userId, 
+          questionId: questionId, 
+          isCorrect: true 
+        }
+      });
+    
+      return res.status(201).json({
+        message: isCorrect ? "Correct!" : "Incorrect!",
+        correct: isCorrect, 
+        isSolved: correctAttemptsCount > 0,
+        correctAnswer: isCorrect ? question.content : "not this one! Try again.",
+        attempt: attempt
+      });
+    } catch (err) {
+      next(err);
+    }
 });
 
 module.exports = router;

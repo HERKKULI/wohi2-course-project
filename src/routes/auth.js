@@ -3,6 +3,7 @@ const router = express.Router();
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const prisma = require("../lib/prisma");
+const { ValidationError, ConflictError, ForbiddenError } = require("../lib/errors");
 
 const SECRET = process.env.JWT_SECRET;
 // Here we will add all routes related to authentication
@@ -11,14 +12,13 @@ router.post("/register", async (req, res) => {
   const { email, password, name } = req.body;
 
   if (!email || !password || !name) {
-    return res.status(400).json({ error: "email, password and name are required" });
+    throw new ValidationError("email, password and name are required");
   }
 
   // Check if user already exists
   const existingUser = await prisma.user.findUnique({ where: { email },});
-
   if (existingUser) {
-    return res.status(409).json({ error: "Email already registered" });
+    if (existing) throw new ConflictError("Email already registered");
   }
 
   // Hash the password
@@ -41,25 +41,18 @@ router.post("/register", async (req, res) => {
 router.post("/login", async (req, res) => {
   const { email, password } = req.body;
 
-  if (!email || !password) {
-    return res.status(400).json({ error: "email and password are required" });
-  }
+  if (!email || !password)
+    throw new ValidationError("email and password are required");
 
   // Find the user
-  const user = await prisma.user.findUnique({
-    where: { email },
-  });
-
-  if (!user) {
-    return res.status(401).json({ error: "Invalid credentials" });
-  }
+  const user = await prisma.user.findUnique({where: { email } });
+    if (!user) throw new UnauthorizedError("Invalid credentials");
 
   // Verify the password
   const isValid = await bcrypt.compare(password, user.password);
 
-  if (!isValid) {
-    return res.status(401).json({ error: "Invalid credentials" });
-  }
+  if (!isValid)
+    throw new ForbiddenError("Invalid credentials");
 
   // Generate a token
   const token = jwt.sign({ userId: user.id }, SECRET, { expiresIn: "1h" });

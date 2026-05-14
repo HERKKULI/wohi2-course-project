@@ -4,6 +4,7 @@ const questionRouter = require("./routes/questions");
 const prisma = require("./lib/prisma");
 const authRouter = require("./routes/auth");
 const path = require('path');
+const errorHandler = require("./middleware/errorHandler");
 const PORT = process.env.PORT || 3000;
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
@@ -16,6 +17,7 @@ app.use("/api/questions", questionRouter);
 app.use((req, res) => {
   res.json({msg: "Not found"});
 });
+app.use(errorHandler);
 
 app.listen(3000, () => {
   console.log("Server running on port 3000");

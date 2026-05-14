@@ -11,6 +11,6 @@ export default defineConfig({
   },
   engine: "classic",
   datasource: {
-    url: "mysql://root:S3pp0h4ns3!%3F@localhost:3308/cms",
+    url: env("DATABASE_URL"),
   },
 });
